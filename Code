@@ -1,0 +1,623 @@
+
+
+
+This code 
+
+
+import tkinter as tk
+from tkinter import ttk
+import serial
+import serial.tools.list_ports
+import threading
+import math
+import platform
+import os
+import io
+import socket
+import time
+from datetime import datetime
+
+# External dependencies for Canvas Image Drawing
+from PIL import ImageTk, Image, ImageDraw
+
+# Dependencies for Email Functionality (Text + Multi-part Image Attachments)
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.mime.image import MIMEImage
+
+# ==========================================
+# SMTP EMAIL CONFIGURATION PROFILE
+# ==========================================
+SMTP_SERVER = "smtp.gmail.com"        
+SMTP_PORT = 587                        
+SENDER_EMAIL = "cyberscope47@gmail.com"  # Replace with your actual email
+SENDER_PASS = "eezb mxtd xmht nbgp"    # Replace with your 16-character Google App Password
+# ==========================================
+
+WINDOW_SIZE = 750
+TARGET_RADIUS = 300
+DOT_RADIUS = 5
+
+x = WINDOW_SIZE // 2
+y = WINDOW_SIZE // 2
+
+center_pitch = 0
+center_yaw = 0
+
+calibrated = False
+shots = []      
+live_path = []  
+ser = None  
+udp_socket = None
+was_firing = False  
+is_running = True # Controls safe background thread termination
+
+# Feature Control Toggles
+show_crosshair = True
+draw_live_line = False
+
+# Futuristic UI Color Palette
+BG_COLOR = "#0A0F1D"       
+ACCENT_CYAN = "#00F0FF"    
+ACCENT_RED = "#FF0055"     
+ACCENT_GREEN = "#39FF14"   
+UI_PANEL_BG = "#141B2D"    
+TEXT_COLOR = "#E2E8F0"     
+
+root = tk.Tk()
+root.title("ADVANCED NEURAL RIFLE HUD v4.5")
+root.configure(bg=BG_COLOR)
+
+# Drop-down combobox styles
+style = ttk.Style()
+style.theme_use("default")
+style.configure("TCombobox", 
+                fieldbackground=UI_PANEL_BG, 
+                background=BG_COLOR, 
+                foreground=TEXT_COLOR, 
+                arrowcolor=ACCENT_CYAN,
+                bordercolor=ACCENT_CYAN)
+
+right_panel = tk.Frame(root, bg=UI_PANEL_BG, bd=2, relief="flat")
+right_panel.grid(row=0, column=1, padx=20, pady=20, sticky="ns")
+
+canvas = tk.Canvas(root,
+                   width=WINDOW_SIZE,
+                   height=WINDOW_SIZE,
+                   bg=BG_COLOR,
+                   highlightthickness=1,
+                   highlightbackground=ACCENT_CYAN)
+canvas.grid(row=0, column=0, padx=20, pady=20)
+
+def draw_target_rings():
+    canvas.delete("target")
+    for i in range(10):
+        r = TARGET_RADIUS * (10 - i) / 10
+        canvas.create_oval(
+            int(WINDOW_SIZE/2-r), int(WINDOW_SIZE/2-r),
+            int(WINDOW_SIZE/2+r), int(WINDOW_SIZE/2+r),
+            outline="#1E293B" if i % 2 == 0 else ACCENT_CYAN,
+            width=1 if i % 2 == 0 else 2,
+            tags="target"
+        )
+    canvas.create_line(int(WINDOW_SIZE/2-TARGET_RADIUS), int(WINDOW_SIZE/2), int(WINDOW_SIZE/2+TARGET_RADIUS), int(WINDOW_SIZE/2), fill="#1E293B", dash=(4, 4), tags="target")
+    canvas.create_line(int(WINDOW_SIZE/2), int(WINDOW_SIZE/2-TARGET_RADIUS), int(WINDOW_SIZE/2), int(WINDOW_SIZE/2+TARGET_RADIUS), fill="#1E293B", dash=(4, 4), tags="target")
+
+draw_target_rings()
+
+port_var = tk.StringVar()
+ports = [p.device for p in serial.tools.list_ports.comports()]
+if ports:
+    port_var.set(ports[0])
+
+port_menu = ttk.Combobox(right_panel, textvariable=port_var, values=ports, width=18, state="readonly")
+port_menu.pack(pady=(10, 5), padx=15)
+
+status = tk.Label(right_panel, text="HUD: OFFLINE", fg=ACCENT_RED, bg=UI_PANEL_BG, font=("Courier", 11, "bold"))
+status.pack(pady=2)
+
+sens_label = tk.Label(right_panel, text="SENSITIVITY MATRIX", fg=TEXT_COLOR, bg=UI_PANEL_BG, font=("Courier", 8))
+sens_label.pack(pady=(5,0))
+sens = tk.Scale(right_panel,
+                from_=1, to=20, resolution=0.1, orient=tk.HORIZONTAL, length=180,
+                bg=UI_PANEL_BG, fg=TEXT_COLOR, highlightthickness=0, troughcolor=BG_COLOR, activebackground=ACCENT_CYAN)
+sens.set(8)
+sens.pack(pady=2)
+
+score_label = tk.Label(right_panel, text="SCORE: 00", fg=ACCENT_GREEN, bg=UI_PANEL_BG, font=("Courier", 16, "bold"))
+score_label.pack(pady=5)
+
+def play_sound():
+    def _play():
+        try:
+            current_os = platform.system()
+            sound_file = "fire.wav"
+            if os.path.exists(sound_file):
+                if current_os == "Windows":
+                    import winsound
+                    winsound.PlaySound(sound_file, winsound.SND_FILENAME | winsound.SND_ASYNC)
+                elif current_os == "Darwin":
+                    os.system(f"afplay {sound_file} &")
+                else:
+                    os.system(f"aplay {sound_file} &")
+            else:
+                if current_os == "Windows":
+                    import winsound
+                    winsound.Beep(1200, 100)
+                elif current_os == "Darwin":
+                    os.system("say -v Boing 'click' &")
+                else:
+                    os.system("beep -f 1200 -l 100 &")
+        except Exception as e:
+            print(f"Audio System Exception: {e}")
+    threading.Thread(target=_play, daemon=True).start()
+
+def connect():
+    global ser, udp_socket
+    try:
+        # Gracefully shut down existing Wi-Fi socket if active
+        if udp_socket:
+            udp_socket.close()
+            udp_socket = None
+            
+        if ser and ser.is_open:
+            ser.close()
+            
+        ser = serial.Serial(port_var.get(), 115200, timeout=1)
+        status.config(text="HUD: SERIAL ONLINE", fg=ACCENT_CYAN)
+        threading.Thread(target=read_serial, daemon=True).start()
+    except Exception as e:
+        status.config(text="LINK ERROR", fg=ACCENT_RED)
+
+def connect_wifi():
+    global udp_socket, ser
+    try:
+        # Gracefully shut down existing Serial stream if active
+        if ser and ser.is_open:
+            ser.close()
+            ser = None
+
+        if udp_socket:
+            udp_socket.close()
+            
+        udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # Avoid "Address already in use" system flags on restarts
+        udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        udp_socket.bind(("0.0.0.0", 4210))
+        udp_socket.settimeout(1.0) # Prevents thread lockups when waiting for packets
+        
+        status.config(text="HUD: WIFI ONLINE", fg=ACCENT_GREEN)
+        threading.Thread(target=read_wifi, daemon=True).start()
+    except Exception as e:
+        status.config(text="WIFI LINK ERROR", fg=ACCENT_RED)
+        print(f"Network error: {e}")
+
+def create_hud_button(parent, text, command, color=ACCENT_CYAN):
+    return tk.Button(parent, text=text, command=command, bg=BG_COLOR, fg=color,
+                     activebackground=color, activeforeground=BG_COLOR,
+                     font=("Courier", 9, "bold"), relief="solid", bd=1, width=20, cursor="hand2")
+
+btn_connect = create_hud_button(right_panel, "INITIALIZE SERIAL", connect)
+btn_connect.pack(pady=3, padx=15)
+
+btn_wifi_connect = create_hud_button(right_panel, "INITIALIZE WI-FI", connect_wifi, color=ACCENT_GREEN)
+btn_wifi_connect.pack(pady=3, padx=15)
+
+def toggle_crosshair():
+    global show_crosshair
+    show_crosshair = not show_crosshair
+    btn_crosshair.config(fg=ACCENT_CYAN if show_crosshair else "#475569")
+    redraw()
+
+btn_crosshair = create_hud_button(right_panel, "TOGGLE RETICLE", toggle_crosshair)
+btn_crosshair.pack(pady=3)
+
+def toggle_line():
+    global draw_live_line, live_path
+    draw_live_line = not draw_live_line
+    btn_line.config(fg=ACCENT_GREEN if draw_live_line else "#475569")
+    if not draw_live_line:
+        live_path = []
+    redraw()
+
+btn_line = create_hud_button(right_panel, "DRAW PATH: OFF", toggle_line, color="#475569")
+btn_line.config(command=lambda: [toggle_line(), btn_line.config(text="DRAW PATH: ON" if draw_live_line else "DRAW PATH: OFF")])
+btn_line.pack(pady=3)
+
+def compile_shot_logs():
+    report = "== HUD DATA TERMINAL EXPORT ==\n"
+    report += f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+    report += f"Total recorded data packets: {len(shots)}\n"
+    report += "---------------------------------------\n"
+    for i, (_, _, timestamp, hit_score) in enumerate(shots[:50], 1):
+        report += f"Shot #{i:02d} | Time: [{timestamp}] | Telemetry Score: {hit_score:02d} Pts\n"
+    report += "---------------------------------------\n"
+    report += "End of System Stream Log Transmission."
+    return report
+
+def generate_pil_image():
+    card_size = 400
+    img = Image.new("RGB", (card_size, card_size), BG_COLOR)
+    draw = ImageDraw.Draw(img)
+    
+    scale = card_size / WINDOW_SIZE
+    center = card_size / 2
+    tgt_r = TARGET_RADIUS * scale
+    
+    for i in range(10):
+        r = tgt_r * (10 - i) / 10
+        ring_color = "#1E293B" if i % 2 == 0 else ACCENT_CYAN
+        ring_width = 1 if i % 2 == 0 else 2
+        draw.ellipse([center-r, center-r, center+r, center+r], outline=ring_color, width=ring_width)
+        
+    draw.line([center-tgt_r, center, center+tgt_r, center], fill="#1E293B", width=1)
+    draw.line([center, center-tgt_r, center, center+tgt_r], fill="#1E293B", width=1)
+    
+    for shot in shots:
+        sx, sy = shot[0] * scale, shot[1] * scale
+        draw.ellipse([sx-5, sy-5, sx+5, sy+5], outline=ACCENT_RED, width=1)
+        draw.ellipse([sx-1, sy-1, sx+1, sy+1], fill=ACCENT_RED)
+        
+    return img
+
+def generate_performance_card():
+    if not shots: return
+    card_win = tk.Toplevel(root)
+    card_win.title("TACTICAL PERFORMANCE CARD")
+    card_win.configure(bg=BG_COLOR)
+    card_win.resizable(False, False)
+
+    img = generate_pil_image()
+    img_tk = ImageTk.PhotoImage(img)
+    
+    lbl_title = tk.Label(card_win, text="VISUAL TELEMETRY CARD", fg=ACCENT_CYAN, bg=BG_COLOR, font=("Courier", 11, "bold"))
+    lbl_title.pack(pady=(15, 5))
+
+    lbl_img = tk.Label(card_win, image=img_tk, bg=BG_COLOR, highlightthickness=1, highlightbackground=ACCENT_CYAN)
+    lbl_img.image = img_tk  
+    lbl_img.pack(padx=25, pady=10)
+
+    def save_to_disk():
+        filename = f"shot_card_{datetime.now().strftime('%H%M%S')}.png"
+        img.save(filename)
+        btn_save.config(text="CARD SAVED!", fg=ACCENT_GREEN)
+        card_win.after(1500, lambda: btn_save.config(text="SAVE TO DISK (.PNG)", fg=ACCENT_CYAN))
+
+    btn_save = create_hud_button(card_win, "SAVE TO DISK (.PNG)", save_to_disk, color=ACCENT_CYAN)
+    btn_save.pack(pady=(5, 15))
+
+btn_card = create_hud_button(right_panel, "GENERATE SHOT CARD", generate_performance_card, color=ACCENT_CYAN)
+btn_card.pack(pady=3)
+
+
+# =========================================================================
+# SUB-MODULE: SECURE EMAIL PIPELINE
+# =========================================================================
+def prompt_email_window():
+    if not shots: return
+
+    email_win = tk.Toplevel(root)
+    email_win.title("SECURE MAIL LINK")
+    email_win.configure(bg=BG_COLOR)
+    email_win.resizable(False, False)
+
+    lbl_prompt = tk.Label(email_win, text="ENTER RECIPIENT ADDR:", fg=TEXT_COLOR, bg=BG_COLOR, font=("Courier", 10, "bold"))
+    lbl_prompt.pack(padx=20, pady=(15, 5))
+
+    entry_target = tk.Entry(email_win, width=28, bg=UI_PANEL_BG, fg=ACCENT_CYAN, insertbackground=ACCENT_CYAN,
+                            font=("Courier", 10), relief="solid", bd=1)
+    entry_target.pack(padx=20, pady=5)
+    entry_target.focus_set()
+
+    lbl_mail_status = tk.Label(email_win, text="READY TO COMPILE", fg=ACCENT_CYAN, bg=BG_COLOR, font=("Courier", 9))
+    lbl_mail_status.pack(pady=5)
+
+    def trigger_dispatch():
+        recipient = entry_target.get().strip()
+        if not recipient or "@" not in recipient:
+            lbl_mail_status.config(text="INVALID ROUTE ADDRESS", fg=ACCENT_RED)
+            return
+
+        lbl_mail_status.config(text="COMPILING TARGET CARD...", fg=ACCENT_CYAN)
+        
+        def async_mail_sender():
+            try:
+                msg = MIMEMultipart()
+                msg['Subject'] = f"RIFLE TELEMETRY LOG - {datetime.now().strftime('%H:%M:%S')}"
+                msg['From'] = SENDER_EMAIL
+                msg['To'] = recipient
+
+                body_content = compile_shot_logs()
+                msg.attach(MIMEText(body_content, 'plain'))
+
+                img = generate_pil_image()
+                img_buffer = io.BytesIO()
+                img.save(img_buffer, format="PNG")
+                img_bytes = img_buffer.getvalue()
+
+                img_attachment = MIMEImage(img_bytes, name="shot_performance_card.png")
+                msg.attach(img_attachment)
+
+                root.after(0, lambda: lbl_mail_status.config(text="CONNECTING SMTP GATEWAY...", fg=ACCENT_CYAN))
+                server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
+                server.starttls()
+                server.login(SENDER_EMAIL, SENDER_PASS)
+                server.sendmail(SENDER_EMAIL, recipient, msg.as_string())
+                server.quit()
+
+                root.after(0, lambda: lbl_mail_status.config(text="TRANSMISSION COMPLETED", fg=ACCENT_GREEN))
+                root.after(1500, email_win.destroy)
+            except Exception as mail_err:
+                root.after(0, lambda: lbl_mail_status.config(text="GATEWAY CONNECTION FAILURE", fg=ACCENT_RED))
+                print(f"SMTP error trace: {mail_err}")
+
+        threading.Thread(target=async_mail_sender, daemon=True).start()
+
+    btn_send = create_hud_button(email_win, "DISPATCH TRANSMIT", trigger_dispatch, color=ACCENT_GREEN)
+    btn_send.pack(pady=(10, 15))
+
+btn_email = create_hud_button(right_panel, "EMAIL DATA LOG", prompt_email_window, color=ACCENT_CYAN)
+btn_email.pack(pady=3)
+
+
+# =========================================================================
+# SUB-MODULE: WHATSAPP WEB AUTOMATION PIPELINE (WITH USER FOCUS WARNING)
+# =========================================================================
+def prompt_whatsapp_window():
+    if not shots: return
+
+    wa_win = tk.Toplevel(root)
+    wa_win.title("SECURE WHATSAPP LINK")
+    wa_win.configure(bg=BG_COLOR)
+    wa_win.resizable(False, False)
+
+    lbl_prompt = tk.Label(wa_win, text="ENTER PHONE (10 DIGITS):", fg=TEXT_COLOR, bg=BG_COLOR, font=("Courier", 9, "bold"))
+    lbl_prompt.pack(padx=20, pady=(15, 5))
+
+    entry_target = tk.Entry(wa_win, width=28, bg=UI_PANEL_BG, fg=ACCENT_CYAN, insertbackground=ACCENT_CYAN,
+                            font=("Courier", 10), relief="solid", bd=1)
+    entry_target.pack(padx=20, pady=5)
+    
+    entry_target.insert(0, "+91")
+    entry_target.focus_set()
+    entry_target.icursor(tk.END)
+
+    lbl_wa_status = tk.Label(wa_win, text="READY TO DISPATCH", fg=ACCENT_CYAN, bg=BG_COLOR, font=("Courier", 9))
+    lbl_wa_status.pack(pady=2)
+
+    lbl_warning = tk.Label(wa_win, 
+                           text="⚠️ CRITICAL: DO NOT ALTER OR CLICK\nANYWHERE AFTER HITTING DISPATCH!", 
+                           fg=ACCENT_RED, bg=BG_COLOR, font=("Courier", 8, "bold"), justify="center")
+    lbl_warning.pack(padx=20, pady=5)
+
+    def trigger_dispatch():
+        raw_phone = entry_target.get().strip()
+        
+        if not raw_phone.startswith("+"):
+            if raw_phone.startswith("91") and len(raw_phone) == 12:
+                phone_num = "+" + raw_phone
+            else:
+                phone_num = "+91" + raw_phone
+        else:
+            phone_num = raw_phone
+
+        if len(phone_num) < 12:
+            lbl_wa_status.config(text="INVALID PHONE LENGTH", fg=ACCENT_RED)
+            return
+
+        lbl_wa_status.config(text="STAGING DATA INTERNALS...", fg=ACCENT_CYAN)
+        
+        def async_whatsapp_sender():
+            try:
+                import pywhatkit as pwk
+                
+                temp_filename = "temp_wa_snapshot.png"
+                img = generate_pil_image()
+                img.save(temp_filename)
+                
+                body_content = compile_shot_logs()
+                
+                root.after(0, lambda: lbl_wa_status.config(text="OPENING BROWSER (45S TIMER)...", fg=ACCENT_CYAN))
+                
+                pwk.sendwhats_image(
+                    receiver=phone_num,
+                    img_path=temp_filename,
+                    caption=body_content,
+                    wait_time=45,       
+                    tab_close=True,
+                    close_time=8        
+                )
+                
+                root.after(0, lambda: lbl_wa_status.config(text="TRANSMISSION COMPLETED", fg=ACCENT_GREEN))
+                root.after(1500, lambda: [wa_win.destroy(), os.remove(temp_filename) if os.path.exists(temp_filename) else None])
+            except Exception as wa_err:
+                root.after(0, lambda: lbl_wa_status.config(text="AUTOMATION REJECTED", fg=ACCENT_RED))
+                print(f"WhatsApp Framework Error: {wa_err}")
+
+        threading.Thread(target=async_whatsapp_sender, daemon=True).start()
+
+    btn_send = create_hud_button(wa_win, "DISPATCH WHATSAPP", trigger_dispatch, color=ACCENT_GREEN)
+    btn_send.pack(pady=(5, 15))
+
+btn_whatsapp = create_hud_button(right_panel, "WHATSAPP DATA LOG", prompt_whatsapp_window, color=ACCENT_CYAN)
+btn_whatsapp.pack(pady=3)
+
+
+# =========================================================================
+# PURGE BUTTON & HARDENED DATA LOGGER LISTBOX
+# =========================================================================
+def clear_shots():
+    global shots, live_path
+    shots = []
+    live_path = []
+    score_label.config(text="SCORE: 00")
+    update_table()
+    redraw()
+
+btn_clear = create_hud_button(right_panel, "PURGE FRAME", clear_shots, color=ACCENT_RED)
+btn_clear.pack(pady=(3, 10))
+
+table_frame = tk.Frame(right_panel, bg=UI_PANEL_BG)
+table_frame.pack(pady=5, padx=10, fill="both", expand=True)
+
+header_text = f"{'SHOT #':<8}{'TIMESTAMP':<12}{'SCORE':<10}"
+lbl_table_header = tk.Label(table_frame, text=header_text, fg=ACCENT_CYAN, bg=BG_COLOR, 
+                            font=("Courier", 9, "bold"), anchor="w", justify="left", padx=5, pady=3)
+lbl_table_header.pack(fill="x")
+
+table_scroll = tk.Scrollbar(table_frame, bg=UI_PANEL_BG, troughcolor=BG_COLOR)
+table_scroll.pack(side="right", fill="y")
+
+shot_table = tk.Listbox(table_frame, bg=UI_PANEL_BG, fg=TEXT_COLOR, 
+                        font=("Courier", 9), highlightthickness=1, highlightcolor=ACCENT_CYAN,
+                        selectbackground=ACCENT_CYAN, selectforeground=BG_COLOR,
+                        bd=0, height=14, yscrollcommand=table_scroll.set)
+table_scroll.config(command=shot_table.yview)
+shot_table.pack(side="left", fill="both", expand=True)
+
+def update_table():
+    shot_table.delete(0, tk.END)
+    for i, (_, _, timestamp, hit_score) in enumerate(shots[:50], 1):
+        row_string = f" #{i:02d}     {timestamp}     {hit_score:02d} Pts"
+        shot_table.insert(tk.END, row_string)
+
+def score(px, py):
+    d = math.hypot(px - WINDOW_SIZE/2, py - WINDOW_SIZE/2)
+    ring = int(d / (TARGET_RADIUS / 10))
+    return max(0, 10 - ring)
+
+
+# =========================================================================
+# GRAPHICAL CANVAS ENGINE
+# ========================================================================
+
+def redraw():
+    canvas.delete("dot")
+    canvas.delete("live_elements")
+
+    ix, iy = int(x), int(y)
+
+    if len(live_path) > 1:
+        flat_points = [int(coord) for pt in live_path for coord in pt]
+        canvas.create_line(flat_points, fill=ACCENT_GREEN, width=2, capstyle="round", smooth=True, tags="live_elements")
+
+    for shot in shots:
+        sx, sy = int(shot[0]), int(shot[1])
+        canvas.create_oval(sx-8, sy-8, sx+8, sy+8, outline=ACCENT_RED, width=1, tags="dot")
+        canvas.create_oval(sx-2, sy-2, sx+2, sy+2, fill=ACCENT_RED, outline="", tags="dot")
+
+    if show_crosshair:
+        canvas.create_line(ix-20, iy, ix-6, iy, fill=ACCENT_CYAN, width=1, tags="live_elements")
+        canvas.create_line(ix+6, iy, ix+20, iy, fill=ACCENT_CYAN, width=1, tags="live_elements")
+        canvas.create_line(ix, iy-20, ix, iy-6, fill=ACCENT_CYAN, width=1, tags="live_elements")
+        canvas.create_line(ix, iy+6, ix, iy+20, fill=ACCENT_CYAN, width=1, tags="live_elements")
+
+    canvas.create_oval(
+        ix - DOT_RADIUS, iy - DOT_RADIUS,
+        ix + DOT_RADIUS, iy + DOT_RADIUS,
+        fill="#FFFF00", outline=ACCENT_CYAN, width=1,
+        tags="dot"
+    )
+
+def parse_and_update_hud(line):
+    global x, y, center_pitch, center_yaw, calibrated, was_firing, live_path
+    
+    parts = line.split(",")
+    if len(parts) != 4:
+        return
+
+    pitch = float(parts[0])
+    yaw = float(parts[1])
+    fire = int(parts[2])
+    calibrate = int(parts[3])
+
+    if calibrate:
+        center_pitch = pitch
+        center_yaw = yaw
+        calibrated = True
+        live_path = [] 
+
+    if not calibrated:
+        return
+
+    rel_pitch = pitch - center_pitch
+    rel_yaw = yaw - center_yaw
+    s = sens.get()
+
+    x = int(WINDOW_SIZE/2 - rel_yaw * s)
+    y = int(WINDOW_SIZE/2 - rel_pitch * s)
+
+    x = max(0, min(WINDOW_SIZE, x))
+    y = max(0, min(WINDOW_SIZE, y))
+
+    if draw_live_line:
+        if not live_path or live_path[-1] != (x, y):
+            live_path.append((x, y))
+            if len(live_path) > 150: 
+                live_path.pop(0)
+
+    if fire:
+        if not was_firing:
+            current_score = score(x, y)
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            shots.append((x, y, timestamp, current_score))
+            
+            root.after(0, lambda s_val=current_score: score_label.config(text=f"SCORE: {s_val:02d}"))
+            root.after(0, update_table)
+            play_sound()
+            was_firing = True  
+    else:
+        was_firing = False  
+
+    root.after(0, redraw)
+
+def read_serial():
+    while is_running:
+        try:
+            if ser is None or not ser.is_open:
+                time.sleep(0.1) # Prevents thread from spinning aggressively when disconnected
+                continue
+
+            line = ser.readline().decode('utf-8', errors='ignore').strip()
+            if line:
+                parse_and_update_hud(line)
+
+        except Exception as e:
+            print(f"HUD Serial Exception: {e}")
+            time.sleep(0.5)
+
+def read_wifi():
+    while is_running:
+        try:
+            if udp_socket is None:
+                time.sleep(0.1) # Fixes high CPU utilization when disconnected
+                continue
+            
+            try:
+                data, addr = udp_socket.recvfrom(1024)
+                line = data.decode('utf-8', errors='ignore').strip()
+                if line:
+                    parse_and_update_hud(line)
+            except socket.timeout:
+                continue # Graceful skip on timeout ticks to keep thread responsive
+            
+        except Exception as e:
+            print(f"HUD Wi-Fi Exception: {e}")
+            time.sleep(0.5)
+
+# Clean shutdown protocol when user closes window
+def on_closing():
+    global is_running, ser, udp_socket
+    is_running = False
+    try:
+        if ser and ser.is_open:
+            ser.close()
+        if udp_socket:
+            udp_socket.close()
+    except:
+        pass
+    root.destroy()
+
+root.protocol("WM_DELETE_WINDOW", on_closing)
+root.mainloop()
