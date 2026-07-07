@@ -1,0 +1,10 @@
+Sound Sensor
+VCC.   3.3V
+GND.   GND
+DO.    GPIO27
+AO.    Not Connected
+MPU9250
+VCC.  3.3V
+GND.  GND
+SDA.  Gpio21
+SCL.  Gpio22
