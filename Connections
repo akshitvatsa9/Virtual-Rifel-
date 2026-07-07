@@ -8,3 +8,6 @@ VCC.  3.3V
 GND.  GND
 SDA.  Gpio21
 SCL.  Gpio22
+Buttons 
+fire button     Gpio 25
+calibration     Gpio 26
