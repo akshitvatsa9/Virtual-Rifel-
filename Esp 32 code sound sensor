@@ -1,0 +1,128 @@
+#include <Wire.h>
+#include <MPU9250_asukiaaa.h>
+#include <MadgwickAHRS.h>
+#include <WiFi.h>
+#include <WiFiUdp.h>
+
+MPU9250_asukiaaa sensor;
+Madgwick filter;
+WiFiUDP udp;
+
+// ==========================================
+// HOTSPOT CONFIGURATION (AP MODE)
+// ==========================================
+const char* ssid = "NEURAL_RIFLE_HUD";
+const char* password = "Password123";
+
+const char* broadcastIP = "192.168.4.255";
+const int udpPort = 4210;
+
+// Buttons
+const int FIRE_BTN = 25;
+const int CAL_BTN = 26;
+
+// Sound Sensor Digital Output
+const int SOUND_PIN = 27;
+
+// Gyroscope Bias
+float gxBias = 1.06;
+float gyBias = 0.30;
+float gzBias = 0.24;
+
+// Center Reference
+float centerPitch = 0;
+float centerYaw = 0;
+bool centered = false;
+bool lastCal = false;
+
+void setup() {
+
+  Serial.begin(115200);
+
+  // I2C Pins for ESP32-WROOM
+  Wire.begin(21, 22);
+
+  pinMode(FIRE_BTN, INPUT_PULLUP);
+  pinMode(CAL_BTN, INPUT_PULLUP);
+  pinMode(SOUND_PIN, INPUT);
+
+  sensor.setWire(&Wire);
+  sensor.beginAccel();
+  sensor.beginGyro();
+
+  filter.begin(100);
+
+  Serial.print("Configuring Access Point: ");
+  Serial.println(ssid);
+
+  WiFi.softAP(ssid, password);
+
+  Serial.println("Hotspot Activated Successfully!");
+  Serial.print("ESP32 Hotspot IP: ");
+  Serial.println(WiFi.softAPIP());
+
+  udp.begin(udpPort);
+
+  Serial.print("UDP Port: ");
+  Serial.println(udpPort);
+}
+
+void loop() {
+
+  sensor.accelUpdate();
+  sensor.gyroUpdate();
+
+  float gx = sensor.gyroY() - gxBias;
+  float gy = sensor.gyroX() - gyBias;
+  float gz = sensor.gyroZ() - gzBias;
+
+  float ax = sensor.accelY();
+  float ay = sensor.accelX();
+  float az = sensor.accelZ();
+
+  filter.updateIMU(gx, gy, gz, ax, ay, az);
+
+  float pitch = filter.getPitch();
+  float yaw = filter.getYaw();
+
+  // Fire if either the button is pressed OR the sound sensor detects sound
+  bool fire = (!digitalRead(FIRE_BTN)) || digitalRead(SOUND_PIN);
+
+  bool cal = !digitalRead(CAL_BTN);
+
+  // Calibration
+  if (cal && !lastCal) {
+    centerPitch = pitch;
+    centerYaw = yaw;
+    centered = true;
+  }
+
+  lastCal = cal;
+
+  if (centered) {
+    pitch -= centerPitch;
+    yaw -= centerYaw;
+  }
+
+  if (abs(pitch) < 0.2)
+    pitch = 0;
+
+  if (abs(yaw) < 0.2)
+    yaw = 0;
+
+  // Telemetry Format:
+  // Pitch,Yaw,Fire,Calibration
+  String telemetry =
+      String(pitch, 2) + "," +
+      String(yaw, 2) + "," +
+      String(fire) + "," +
+      String(cal);
+
+  Serial.println(telemetry);
+
+  udp.beginPacket(broadcastIP, udpPort);
+  udp.print(telemetry);
+  udp.endPacket();
+
+  delay(10);
+}
