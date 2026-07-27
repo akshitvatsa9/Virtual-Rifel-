@@ -11,3 +11,12 @@ SCL.  Gpio22
 Buttons 
 fire button     Gpio 25
 calibration     Gpio 26
+hall effect sensor signal       gpio 27
+
+
+old rifle connections 
+sda a4
+scl a5
+joystick 
+x a2
+y a1
