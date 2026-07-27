@@ -1,0 +1,142 @@
+import pygame
+import socket
+import math
+
+# === Must be FIRST ===
+pygame.init()
+
+# === Window setup ===
+WIDTH, HEIGHT = 800, 600
+CENTER = (WIDTH // 2, HEIGHT // 2)
+screen = pygame.display.set_mode((WIDTH, HEIGHT))
+pygame.display.set_caption("Virtual Rifle")
+clock = pygame.time.Clock()
+
+# === Fonts (after init) ===
+font = pygame.font.SysFont(None, 36)
+big_font = pygame.font.SysFont(None, 48)
+
+# === State ===
+centerX, centerY = 0.0, 0.0
+calibrated = False
+shots = []
+view = "main"
+
+# === Score rings ===
+ring_radii = [20 * i for i in range(1, 11)]
+ring_scores = list(range(10, 0, -1))
+
+# === UDP setup (Changed to PORT 5055) ===
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.bind(("0.0.0.0", 5055))  # ✅ Changed from 5050 to 5055
+sock.setblocking(False)
+
+# === Buttons ===
+next_btn = pygame.Rect(650, 20, 120, 40)
+reset_btn = pygame.Rect(650, 70, 120, 40)
+back_btn = pygame.Rect(650, 500, 120, 40)
+
+# === Utility ===
+def get_score(distance):
+    for r, s in zip(ring_radii, ring_scores):
+        if distance <= r:
+            return s
+    return 0
+
+def draw_target():
+    for i in range(10, 0, -1):
+        color = (255 - i * 20, 255 - i * 20, 255)
+        pygame.draw.circle(screen, color, CENTER, i * 20, 2)
+
+def draw_shots():
+    for i, ((x, y), score) in enumerate(shots):
+        pygame.draw.circle(screen, (255, 0, 0), (x, y), 5)
+        label = font.render(f"{i+1}:{score}", True, (255, 255, 0))
+        screen.blit(label, (x + 10, y))
+
+def draw_buttons():
+    pygame.draw.rect(screen, (0, 200, 100), next_btn)
+    pygame.draw.rect(screen, (0, 100, 200), reset_btn)
+    screen.blit(font.render("Next", True, (255, 255, 255)), (next_btn.x + 25, next_btn.y + 5))
+    screen.blit(font.render("Reset", True, (255, 255, 255)), (reset_btn.x + 20, reset_btn.y + 5))
+
+def draw_back():
+    pygame.draw.rect(screen, (200, 50, 50), back_btn)
+    screen.blit(font.render("Back", True, (255, 255, 255)), (back_btn.x + 30, back_btn.y + 5))
+
+def process_fire(x, y):
+    dx = (x - centerX) * 500
+    dy = (y - centerY) * 500
+    screen_x = CENTER[0] + int(dx)
+    screen_y = CENTER[1] - int(dy)
+    dist = math.hypot(dx, dy)
+    score = get_score(dist)
+    shots.append(((screen_x, screen_y), score))
+
+def set_center(x, y):
+    global centerX, centerY, calibrated
+    centerX = x
+    centerY = y
+    calibrated = True
+    print(f"[✓] Calibrated → centerX={x:.4f}, centerY={y:.4f}")
+
+def handle_udp():
+    try:
+        data, _ = sock.recvfrom(1024)
+        msg = data.decode().strip()
+        if msg.startswith("CALIBRATE:"):
+            x, y = map(float, msg[10:].split(","))
+            set_center(x, y)
+        elif msg.startswith("FIRE:") and calibrated:
+            x, y = map(float, msg[5:].split(","))
+            process_fire(x, y)
+    except:
+        pass
+
+def draw_score_screen():
+    screen.fill((30, 30, 30))
+    y = 100
+    total = 0
+    for i, (_, score) in enumerate(shots):
+        txt = font.render(f"Shot {i+1} → {score}", True, (255, 255, 0))
+        screen.blit(txt, (60, y))
+        y += 40
+        total += score
+    total_text = big_font.render(f"Total Score: {total}", True, (0, 255, 0))
+    screen.blit(total_text, (60, y + 20))
+    draw_back()
+
+# === Main Loop ===
+running = True
+while running:
+    screen.fill((0, 0, 0))
+    handle_udp()
+
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            running = False
+        elif event.type == pygame.MOUSEBUTTONDOWN:
+            if view == "main":
+                if next_btn.collidepoint(event.pos):
+                    view = "score"
+                elif reset_btn.collidepoint(event.pos):
+                    shots.clear()
+                    calibrated = False
+            elif view == "score":
+                if back_btn.collidepoint(event.pos):
+                    view = "main"
+
+    if view == "main":
+        draw_target()
+        draw_shots()
+        draw_buttons()
+        if not calibrated:
+            txt = big_font.render("📲 Send CALIBRATE from phone", True, (255, 255, 0))
+            screen.blit(txt, (80, HEIGHT // 2))
+    elif view == "score":
+        draw_score_screen()
+
+    pygame.display.flip()
+    clock.tick(30)
+
+pygame.quit()
