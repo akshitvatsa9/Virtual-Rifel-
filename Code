@@ -1,7 +1,4 @@
-
-
-
-This code 
+#this code is without any tan theta calculation #
 
 
 import tkinter as tk
