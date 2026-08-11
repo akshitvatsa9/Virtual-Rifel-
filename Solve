@@ -1,0 +1,258 @@
+#include <Wire.h>
+#include <MPU9250_asukiaaa.h>
+#include <MadgwickAHRS.h>
+#include <WiFi.h>
+#include <WiFiUdp.h>
+
+// ==========================================
+// OBJECTS
+// ==========================================
+MPU9250_asukiaaa sensor;
+Madgwick filter;
+WiFiUDP udp;
+
+// ==========================================
+// HOTSPOT CONFIGURATION
+// ==========================================
+const char* ssid     = "NEURAL_RIFLE_HUD";
+const char* password = "Password123";
+
+// ESP32 AP default IP: 192.168.4.1
+const char* broadcastIP = "192.168.4.255";
+
+const int udpPort = 4210;
+
+// ==========================================
+// BUTTONS & HALL SENSOR
+// ==========================================
+const int FIRE_BTN = 25;
+const int CAL_BTN  = 26;
+const int HALL_PIN = 27;
+
+// ==========================================
+// GYRO BIAS VALUES
+// ==========================================
+float gxBias = 1.06;
+float gyBias = 0.30;
+float gzBias = 0.24;
+
+// ==========================================
+// CENTER REFERENCE
+// ==========================================
+float centerPitch = 0;
+float centerYaw   = 0;
+
+bool centered = false;
+bool lastCal  = false;
+
+// ==========================================
+// SETUP
+// ==========================================
+void setup() {
+
+  Serial.begin(115200);
+
+  // ========================================
+  // I2C
+  // ========================================
+  Wire.begin();
+
+  // ========================================
+  // GPIO CONFIGURATION
+  // ========================================
+
+  // FIRE BUTTON:
+  // Switch between GPIO25 and GND
+  // INPUT_PULLUP means:
+  // OPEN    = HIGH
+  // PRESSED = LOW
+  pinMode(FIRE_BTN, INPUT_PULLUP);
+
+  // CALIBRATION BUTTON:
+  // Switch between GPIO26 and GND
+  pinMode(CAL_BTN, INPUT_PULLUP);
+
+  // HALL SENSOR
+  pinMode(HALL_PIN, INPUT);
+
+  // ========================================
+  // MPU9250
+  // ========================================
+  sensor.setWire(&Wire);
+
+  sensor.beginAccel();
+  sensor.beginGyro();
+
+  // ========================================
+  // MADGWICK FILTER
+  // ========================================
+  filter.begin(100);
+
+  // ========================================
+  // ESP32 ACCESS POINT
+  // ========================================
+  Serial.println();
+  Serial.println("======================================");
+  Serial.println("       PRECISION AIM / NEURAL HUD");
+  Serial.println("======================================");
+
+  Serial.print("Starting hotspot: ");
+  Serial.println(ssid);
+
+  WiFi.softAP(ssid, password);
+
+  Serial.println("Hotspot Activated Successfully!");
+
+  Serial.print("ESP32 Hotspot IP: ");
+  Serial.println(WiFi.softAPIP());
+
+  // ========================================
+  // UDP
+  // ========================================
+  udp.begin(udpPort);
+
+  Serial.print("UDP active on port: ");
+  Serial.println(udpPort);
+
+  Serial.println();
+  Serial.println("System Ready.");
+  Serial.println();
+}
+
+// ==========================================
+// MAIN LOOP
+// ==========================================
+void loop() {
+
+  // ========================================
+  // UPDATE MPU9250
+  // ========================================
+  sensor.accelUpdate();
+  sensor.gyroUpdate();
+
+  // ========================================
+  // AXIS REMAPPING + GYRO BIAS
+  // ========================================
+  float gx = sensor.gyroY() - gxBias;
+  float gy = sensor.gyroX() - gyBias;
+  float gz = sensor.gyroZ() - gzBias;
+
+  float ax = sensor.accelY();
+  float ay = sensor.accelX();
+  float az = sensor.accelZ();
+
+  // ========================================
+  // MADGWICK SENSOR FUSION
+  // ========================================
+  filter.updateIMU(
+    gx,
+    gy,
+    gz,
+    ax,
+    ay,
+    az
+  );
+
+  // ========================================
+  // GET ORIENTATION
+  // ========================================
+  float pitch = filter.getPitch();
+  float yaw   = filter.getYaw();
+
+  // ========================================
+  // FIRE BUTTON
+  // ========================================
+  // GPIO25:
+  // HIGH = switch open
+  // LOW  = switch pressed
+  bool buttonFire = (digitalRead(FIRE_BTN) == LOW);
+
+  // ========================================
+  // HALL SENSOR
+  // ========================================
+  bool hallFire = (digitalRead(HALL_PIN) == HIGH);
+
+  // ========================================
+  // FIRE STATE
+  // ========================================
+  // Fire when either:
+  // 1. GPIO25 switch is pressed
+  // OR
+  // 2. Hall sensor is activated
+  bool fire = buttonFire || hallFire;
+
+  // ========================================
+  // CALIBRATION BUTTON
+  // ========================================
+  bool cal = (digitalRead(CAL_BTN) == LOW);
+
+  // ========================================
+  // CALIBRATION PRESS DETECTION
+  // ========================================
+  if (cal && !lastCal) {
+
+    centerPitch = pitch;
+    centerYaw   = yaw;
+
+    centered = true;
+
+    Serial.println("CENTER CALIBRATED");
+  }
+
+  lastCal = cal;
+
+  // ========================================
+  // APPLY CENTER OFFSET
+  // ========================================
+  if (centered) {
+
+    pitch -= centerPitch;
+    yaw   -= centerYaw;
+  }
+
+  // ========================================
+  // SMALL DEAD ZONE
+  // ========================================
+  if (abs(pitch) < 0.2) {
+    pitch = 0;
+  }
+
+  if (abs(yaw) < 0.2) {
+    yaw = 0;
+  }
+
+  // ========================================
+  // CREATE TELEMETRY
+  // ========================================
+  //
+  // Format:
+  // pitch,yaw,fire,cal
+  //
+  // Example:
+  // 2.35,-1.27,1,0
+  //
+  String telemetry =
+      String(pitch, 2) + "," +
+      String(yaw, 2) + "," +
+      String(fire ? 1 : 0) + "," +
+      String(cal ? 1 : 0);
+
+  // ========================================
+  // SERIAL OUTPUT
+  // ========================================
+  Serial.println(telemetry);
+
+  // ========================================
+  // UDP BROADCAST
+  // ========================================
+  udp.beginPacket(broadcastIP, udpPort);
+
+  udp.print(telemetry);
+
+  udp.endPacket();
+
+  // ========================================
+  // 100 Hz UPDATE RATE
+  // ========================================
+  delay(10);
+}
