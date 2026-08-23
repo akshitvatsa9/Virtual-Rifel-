@@ -1,0 +1,218 @@
+#include <Wire.h>
+#include <MPU9250_asukiaaa.h>
+#include <MadgwickAHRS.h>
+#include <WiFi.h>
+#include <WiFiUdp.h>
+
+MPU9250_asukiaaa sensor;
+Madgwick filter;
+WiFiUDP udp;
+
+// ==========================================
+// HOTSPOT CONFIGURATION
+// ==========================================
+const char* ssid     = "NEURAL_RIFLE_HUD";
+const char* password = "Password123";
+
+const char* broadcastIP = "192.168.4.255";
+const int udpPort = 4210;
+
+// ==========================================
+// BUTTONS & HALL SENSOR
+// ==========================================
+const int FIRE_BTN = 25;
+const int CAL_BTN  = 26;
+const int HALL_PIN = 27;
+
+// ==========================================
+// GYRO BIAS VALUES
+// ==========================================
+float gxBias = 1.06;
+float gyBias = 0.30;
+float gzBias = 0.24;
+
+// ==========================================
+// CENTER REFERENCE
+// ==========================================
+float centerPitch = 0;
+float centerYaw = 0;
+
+bool centered = false;
+bool lastCal = false;
+
+// ==========================================
+// FIRE EDGE DETECTION
+// ==========================================
+bool lastHall = false;
+bool lastButton = false;
+
+void setup() {
+
+  Serial.begin(115200);
+
+  // ========================================
+  // I2C
+  // ========================================
+  Wire.begin();
+
+  // ========================================
+  // INPUTS
+  // ========================================
+  pinMode(FIRE_BTN, INPUT_PULLUP);
+  pinMode(CAL_BTN, INPUT_PULLUP);
+  pinMode(HALL_PIN, INPUT);
+
+  // ========================================
+  // MPU9250
+  // ========================================
+  sensor.setWire(&Wire);
+
+  sensor.beginAccel();
+  sensor.beginGyro();
+
+  // ========================================
+  // MADGWICK FILTER
+  // ========================================
+  filter.begin(100);
+
+  // ========================================
+  // ESP32 ACCESS POINT
+  // ========================================
+  Serial.print("Configuring Access Point: ");
+  Serial.println(ssid);
+
+  WiFi.softAP(ssid, password);
+
+  Serial.println("Hotspot Activated Successfully!");
+
+  Serial.print("ESP32 Hotspot IP Address: ");
+  Serial.println(WiFi.softAPIP());
+
+  // ========================================
+  // UDP
+  // ========================================
+  udp.begin(udpPort);
+
+  Serial.print("UDP Broadcast engine active on Port: ");
+  Serial.println(udpPort);
+
+  Serial.println("--------------------------------");
+  Serial.println("PrecisionAim Ready");
+  Serial.println("--------------------------------");
+}
+
+
+void loop() {
+
+  // ========================================
+  // READ MPU9250
+  // ========================================
+  sensor.accelUpdate();
+  sensor.gyroUpdate();
+
+  // ========================================
+  // AXIS REMAPPING + GYRO BIAS
+  // ========================================
+  float gx = sensor.gyroY() - gxBias;
+  float gy = sensor.gyroX() - gyBias;
+  float gz = sensor.gyroZ() - gzBias;
+
+  float ax = sensor.accelY();
+  float ay = sensor.accelX();
+  float az = sensor.accelZ();
+
+  // ========================================
+  // UPDATE MADGWICK
+  // ========================================
+  filter.updateIMU(gx, gy, gz, ax, ay, az);
+
+  float pitch = filter.getPitch();
+  float yaw   = filter.getYaw();
+
+  // ========================================
+  // CALIBRATION BUTTON
+  // ========================================
+  bool cal = !digitalRead(CAL_BTN);
+
+  // Detect calibration button press
+  if (cal && !lastCal) {
+
+    centerPitch = pitch;
+    centerYaw = yaw;
+
+    centered = true;
+
+    Serial.println("CALIBRATED!");
+  }
+
+  lastCal = cal;
+
+  // ========================================
+  // APPLY CENTER
+  // ========================================
+  if (centered) {
+
+    pitch -= centerPitch;
+    yaw   -= centerYaw;
+  }
+
+  // ========================================
+  // SMALL DEADZONE
+  // ========================================
+  if (abs(pitch) < 0.2)
+    pitch = 0;
+
+  if (abs(yaw) < 0.2)
+    yaw = 0;
+
+  // ========================================
+  // HALL + FIRE BUTTON
+  // ========================================
+
+  // If your Hall module outputs HIGH
+  // when the magnet is near:
+  bool hallActive = digitalRead(HALL_PIN);
+
+  // Normal trigger button
+  bool buttonActive = !digitalRead(FIRE_BTN);
+
+  // ========================================
+  // EDGE DETECTION
+  // ========================================
+
+  // Fire only when the input changes
+  // from inactive -> active.
+  bool fire =
+      (hallActive && !lastHall) ||
+      (buttonActive && !lastButton);
+
+  // Save current state for next cycle
+  lastHall = hallActive;
+  lastButton = buttonActive;
+
+  // ========================================
+  // TELEMETRY
+  // ========================================
+  String telemetry =
+      String(pitch, 2) + "," +
+      String(yaw, 2) + "," +
+      String(fire) + "," +
+      String(cal);
+
+  // ========================================
+  // SERIAL MONITOR
+  // ========================================
+  Serial.println(telemetry);
+
+  // ========================================
+  // UDP BROADCAST
+  // ========================================
+  udp.beginPacket(broadcastIP, udpPort);
+  udp.print(telemetry);
+  udp.endPacket();
+
+  // ========================================
+  // 100 Hz LOOP
+  // ========================================
+  delay(10);
+}
