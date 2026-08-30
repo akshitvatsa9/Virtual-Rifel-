@@ -46,6 +46,9 @@ bool lastCal = false;
 bool lastHall = false;
 bool lastButton = false;
 
+// ==========================================
+// SETUP
+// ==========================================
 void setup() {
 
   Serial.begin(115200);
@@ -60,7 +63,9 @@ void setup() {
   // ========================================
   pinMode(FIRE_BTN, INPUT_PULLUP);
   pinMode(CAL_BTN, INPUT_PULLUP);
-  pinMode(HALL_PIN, INPUT);
+
+  // Hall sensor uses internal pull-up
+  pinMode(HALL_PIN, INPUT_PULLUP);
 
   // ========================================
   // MPU9250
@@ -101,7 +106,9 @@ void setup() {
   Serial.println("--------------------------------");
 }
 
-
+// ==========================================
+// MAIN LOOP
+// ==========================================
 void loop() {
 
   // ========================================
@@ -122,9 +129,16 @@ void loop() {
   float az = sensor.accelZ();
 
   // ========================================
-  // UPDATE MADGWICK
+  // UPDATE MADGWICK FILTER
   // ========================================
-  filter.updateIMU(gx, gy, gz, ax, ay, az);
+  filter.updateIMU(
+    gx,
+    gy,
+    gz,
+    ax,
+    ay,
+    az
+  );
 
   float pitch = filter.getPitch();
   float yaw   = filter.getYaw();
@@ -169,24 +183,28 @@ void loop() {
   // HALL + FIRE BUTTON
   // ========================================
 
-  // If your Hall module outputs HIGH
-  // when the magnet is near:
-  bool hallActive = digitalRead(HALL_PIN);
+  // Hall sensor:
+  // LOW  = trigger active
+  // HIGH = trigger released
+  bool hallActive = !digitalRead(HALL_PIN);
 
-  // Normal trigger button
+  // Normal push button:
+  // LOW = pressed
+  // HIGH = released
   bool buttonActive = !digitalRead(FIRE_BTN);
 
   // ========================================
-  // EDGE DETECTION
+  // FIRE EDGE DETECTION
   // ========================================
 
-  // Fire only when the input changes
-  // from inactive -> active.
+  // Fire ONLY when trigger/button
+  // changes from inactive -> active.
+
   bool fire =
       (hallActive && !lastHall) ||
       (buttonActive && !lastButton);
 
-  // Save current state for next cycle
+  // Save current states
   lastHall = hallActive;
   lastButton = buttonActive;
 
