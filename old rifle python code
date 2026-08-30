@@ -1,142 +1,188 @@
-import pygame
-import socket
+import tkinter as tk
+from tkinter import ttk
+import serial
+import serial.tools.list_ports
+import threading
 import math
+import pygame
 
-# === Must be FIRST ===
-pygame.init()
+# === Constants ===
+WINDOW_SIZE = 500
+TARGET_RADIUS = 200
+DOT_RADIUS = 5
+COOLDOWN_MS = 1000
+CALIB_CENTER_PITCH = 3.99
+CALIB_CENTER_YAW = 41.75
+FIRE_WAV = "fire.wav"
 
-# === Window setup ===
-WIDTH, HEIGHT = 800, 600
-CENTER = (WIDTH // 2, HEIGHT // 2)
-screen = pygame.display.set_mode((WIDTH, HEIGHT))
-pygame.display.set_caption("Virtual Rifle")
-clock = pygame.time.Clock()
-
-# === Fonts (after init) ===
-font = pygame.font.SysFont(None, 36)
-big_font = pygame.font.SysFont(None, 48)
-
-# === State ===
-centerX, centerY = 0.0, 0.0
+# === App State ===
+x = WINDOW_SIZE // 2
+y = WINDOW_SIZE // 2
+offset_pitch = 0
+offset_yaw = 0
 calibrated = False
+cooldown = False
 shots = []
-view = "main"
+show_dot = True
 
-# === Score rings ===
-ring_radii = [20 * i for i in range(1, 11)]
-ring_scores = list(range(10, 0, -1))
+last_pitch = 0
+last_yaw = 0
 
-# === UDP setup (Changed to PORT 5055) ===
-sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-sock.bind(("0.0.0.0", 5055))  # ✅ Changed from 5050 to 5055
-sock.setblocking(False)
+# === GUI Setup ===
+root = tk.Tk()
+root.title("Virtual Rifle")
+root.configure(bg="yellow")
 
-# === Buttons ===
-next_btn = pygame.Rect(650, 20, 120, 40)
-reset_btn = pygame.Rect(650, 70, 120, 40)
-back_btn = pygame.Rect(650, 500, 120, 40)
-
-# === Utility ===
-def get_score(distance):
-    for r, s in zip(ring_radii, ring_scores):
-        if distance <= r:
-            return s
-    return 0
+canvas = tk.Canvas(root, width=WINDOW_SIZE, height=WINDOW_SIZE, bg="black", highlightthickness=0)
+canvas.grid(row=0, column=0, rowspan=10, padx=10, pady=10)
 
 def draw_target():
-    for i in range(10, 0, -1):
-        color = (255 - i * 20, 255 - i * 20, 255)
-        pygame.draw.circle(screen, color, CENTER, i * 20, 2)
+    canvas.delete("target")
+    for i in range(10):
+        r = TARGET_RADIUS * (10 - i) / 10
+        canvas.create_oval(WINDOW_SIZE/2 - r, WINDOW_SIZE/2 - r,
+                           WINDOW_SIZE/2 + r, WINDOW_SIZE/2 + r,
+                           outline="white", tags="target")
 
-def draw_shots():
-    for i, ((x, y), score) in enumerate(shots):
-        pygame.draw.circle(screen, (255, 0, 0), (x, y), 5)
-        label = font.render(f"{i+1}:{score}", True, (255, 255, 0))
-        screen.blit(label, (x + 10, y))
+draw_target()
 
-def draw_buttons():
-    pygame.draw.rect(screen, (0, 200, 100), next_btn)
-    pygame.draw.rect(screen, (0, 100, 200), reset_btn)
-    screen.blit(font.render("Next", True, (255, 255, 255)), (next_btn.x + 25, next_btn.y + 5))
-    screen.blit(font.render("Reset", True, (255, 255, 255)), (reset_btn.x + 20, reset_btn.y + 5))
+port_var = tk.StringVar()
+ports = [p.device for p in serial.tools.list_ports.comports()]
+port_var.set(ports[0] if ports else "")
+port_menu = ttk.Combobox(root, textvariable=port_var, values=ports, width=10)
+port_menu.grid(row=0, column=1)
 
-def draw_back():
-    pygame.draw.rect(screen, (200, 50, 50), back_btn)
-    screen.blit(font.render("Back", True, (255, 255, 255)), (back_btn.x + 30, back_btn.y + 5))
-
-def process_fire(x, y):
-    dx = (x - centerX) * 500
-    dy = (y - centerY) * 500
-    screen_x = CENTER[0] + int(dx)
-    screen_y = CENTER[1] - int(dy)
-    dist = math.hypot(dx, dy)
-    score = get_score(dist)
-    shots.append(((screen_x, screen_y), score))
-
-def set_center(x, y):
-    global centerX, centerY, calibrated
-    centerX = x
-    centerY = y
-    calibrated = True
-    print(f"[✓] Calibrated → centerX={x:.4f}, centerY={y:.4f}")
-
-def handle_udp():
+def connect_serial():
+    global ser
     try:
-        data, _ = sock.recvfrom(1024)
-        msg = data.decode().strip()
-        if msg.startswith("CALIBRATE:"):
-            x, y = map(float, msg[10:].split(","))
-            set_center(x, y)
-        elif msg.startswith("FIRE:") and calibrated:
-            x, y = map(float, msg[5:].split(","))
-            process_fire(x, y)
+        ser = serial.Serial(port_var.get(), 9600, timeout=1)
+        status_label.config(text="Connected", fg="green")
+        threading.Thread(target=read_serial, daemon=True).start()
     except:
-        pass
+        status_label.config(text="Connection Failed", fg="red")
 
-def draw_score_screen():
-    screen.fill((30, 30, 30))
-    y = 100
-    total = 0
-    for i, (_, score) in enumerate(shots):
-        txt = font.render(f"Shot {i+1} → {score}", True, (255, 255, 0))
-        screen.blit(txt, (60, y))
-        y += 40
-        total += score
-    total_text = big_font.render(f"Total Score: {total}", True, (0, 255, 0))
-    screen.blit(total_text, (60, y + 20))
-    draw_back()
+tk.Button(root, text="Connect", command=connect_serial).grid(row=1, column=1)
+status_label = tk.Label(root, text="Not connected", fg="red", bg="yellow")
+status_label.grid(row=2, column=1)
 
-# === Main Loop ===
-running = True
-while running:
-    screen.fill((0, 0, 0))
-    handle_udp()
+tk.Label(root, text="Sensitivity", bg="yellow").grid(row=3, column=1)
+sens_scale = tk.Scale(root, from_=1.0, to=15.0, resolution=0.1, orient=tk.VERTICAL, length=300, bg="yellow")
+sens_scale.set(7.0)
+sens_scale.grid(row=4, column=1)
 
-    for event in pygame.event.get():
-        if event.type == pygame.QUIT:
-            running = False
-        elif event.type == pygame.MOUSEBUTTONDOWN:
-            if view == "main":
-                if next_btn.collidepoint(event.pos):
-                    view = "score"
-                elif reset_btn.collidepoint(event.pos):
-                    shots.clear()
-                    calibrated = False
-            elif view == "score":
-                if back_btn.collidepoint(event.pos):
-                    view = "main"
+score_label = tk.Label(root, text="Score: 0", bg="yellow", font=("Arial", 14))
+score_label.grid(row=5, column=1)
 
-    if view == "main":
-        draw_target()
-        draw_shots()
-        draw_buttons()
-        if not calibrated:
-            txt = big_font.render("📲 Send CALIBRATE from phone", True, (255, 255, 0))
-            screen.blit(txt, (80, HEIGHT // 2))
-    elif view == "score":
-        draw_score_screen()
+calib_label = tk.Label(root, text="Not Calibrated", bg="yellow", fg="red")
+calib_label.grid(row=6, column=1)
 
-    pygame.display.flip()
-    clock.tick(30)
+# === New Buttons ===
+def toggle_dot():
+    global show_dot
+    show_dot = not show_dot
+    draw_all()
+    dot_button.config(text="Show Dot" if not show_dot else "Hide Dot")
 
-pygame.quit()
+def clear_shots():
+    global shots
+    shots = []
+    draw_all()
+    score_label.config(text="Score: 0")
+
+dot_button = tk.Button(root, text="Hide Dot", command=toggle_dot)
+dot_button.grid(row=7, column=1, pady=5)
+
+clear_button = tk.Button(root, text="Refresh", command=clear_shots)
+clear_button.grid(row=8, column=1, pady=5)
+
+# === Sound ===
+pygame.mixer.init()
+try:
+    fire_sound = pygame.mixer.Sound(FIRE_WAV)
+except:
+    fire_sound = None
+
+# === Core Functions ===
+def fire_shot():
+    global cooldown
+    if cooldown:
+        return
+    if fire_sound:
+        fire_sound.play()
+    shots.append((x, y))
+    score = get_score(x, y)
+    score_label.config(text=f"Score: {score}")
+    cooldown = True
+    root.after(COOLDOWN_MS, lambda: set_cooldown(False))
+
+def set_cooldown(val):
+    global cooldown
+    cooldown = val
+
+def get_score(px, py):
+    dx = px - WINDOW_SIZE / 2
+    dy = py - WINDOW_SIZE / 2
+    dist = math.hypot(dx, dy)
+    ring = int(dist / (TARGET_RADIUS / 10))
+    return max(0, 10 - ring)
+
+def draw_all():
+    canvas.delete("dots")
+    for sx, sy in shots:
+        canvas.create_oval(sx - DOT_RADIUS, sy - DOT_RADIUS,
+                           sx + DOT_RADIUS, sy + DOT_RADIUS,
+                           fill="red", tags="dots")
+    if show_dot:
+        canvas.create_oval(x - DOT_RADIUS, y - DOT_RADIUS,
+                           x + DOT_RADIUS, y + DOT_RADIUS,
+                           fill="yellow", tags="dots")
+
+def read_serial():
+    global x, y, offset_pitch, offset_yaw, calibrated
+    global last_pitch, last_yaw
+
+    while True:
+        try:
+            line = ser.readline().decode().strip()
+            if line == "CALIBRATE":
+                offset_pitch = last_pitch - CALIB_CENTER_PITCH
+                offset_yaw = last_yaw - CALIB_CENTER_YAW
+                calibrated = True
+                calib_label.config(text="Calibrated!", fg="green")
+                continue
+
+            parts = line.split(",")
+            if len(parts) != 3:
+                continue
+
+            pitch = float(parts[0])
+            yaw = float(parts[1])
+            fire = int(parts[2])
+
+            last_pitch = pitch
+            last_yaw = yaw
+
+            if not calibrated:
+                calib_label.config(text="Not Calibrated", fg="red")
+                continue
+
+            adj_pitch = pitch - offset_pitch
+            adj_yaw = yaw - offset_yaw
+
+            sensitivity = sens_scale.get()
+
+            y_calc = int(WINDOW_SIZE / 2 + (adj_pitch - CALIB_CENTER_PITCH) * (sensitivity * 3.5))
+            y = max(0, min(WINDOW_SIZE, y_calc))
+
+            x_calc = int(WINDOW_SIZE / 2 - (adj_yaw - CALIB_CENTER_YAW) * sensitivity)
+            x = max(0, min(WINDOW_SIZE, x_calc))
+
+            if fire == 1:
+                fire_shot()
+
+            draw_all()
+        except Exception as e:
+            print("Error:", e)
+
+draw_all()
+root.mainloop()
